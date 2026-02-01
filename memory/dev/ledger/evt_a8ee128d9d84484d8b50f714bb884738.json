@@ -1,0 +1,7 @@
+{
+  "tenant_id": "default_tenant",
+  "event_type": "init",
+  "timestamp": "2025-12-20T00:00:00Z",
+  "payload": {},
+  "event_id": "evt_a8ee128d9d84484d8b50f714bb884738"
+}

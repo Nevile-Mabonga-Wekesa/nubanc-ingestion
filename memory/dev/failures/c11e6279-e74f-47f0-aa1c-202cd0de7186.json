@@ -1,0 +1,10 @@
+{
+  "event_id": "c11e6279-e74f-47f0-aa1c-202cd0de7186",
+  "failure_code": "NOT_FOUND",
+  "failure_stage": "normalization",
+  "failure_reason": "Raw event missing",
+  "first_occurred_at": "2026-01-04T02:14:04.412917+00:00",
+  "last_observed_at": "2026-01-04T02:14:04.412917+00:00",
+  "replay_count": 0,
+  "deterministic": true
+}

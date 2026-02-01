@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any
 
+ENV = os.environ["NUBANC_ENV"]
+BASE_PATH = Path(f"memory/{ENV}/raw")
 
 def build_raw_event(
     payload: Dict[str, Any],
@@ -26,7 +28,6 @@ def build_raw_event(
         "schema_version": schema_version,
         "payload": payload,
     }
-
 
 def persist_event(
     event: Dict[str, Any],

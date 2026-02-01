@@ -1,188 +1,68 @@
 import json
 import hashlib
-import logging
-import os
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Dict, Protocol
-
 from replay.replay_engine import load_events
 
-# -----------------------------
-# Configuration
-# -----------------------------
+ENV = os.environ["NUBANC_ENV"]
+LEDGER_PATH = Path(f"memory/{ENV}/ledger")
 
-# Environment variable or default path
-EVENT_FILE = os.getenv("EVENT_FILE", "memory/events.json")
-
-LEDGER_PATH = Path(os.getenv("LEDGER_PATH", "memory/ledger"))
-DECISION_NAMESPACE = "decision.credit_stage"
-DECISION_VERSION = "v1"
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# -----------------------------
-# Domain Contracts
-# -----------------------------
-
-@dataclass(frozen=True)
-class Event:
-    tenant_id: str
-
-    @staticmethod
-    def from_raw(raw: Dict) -> "Event":
-        try:
-            return Event(tenant_id=str(raw["tenant_id"]))
-        except KeyError:
-            raise ValueError("Invalid event: tenant_id missing")
-
-    def fingerprint(self) -> str:
-        return hashlib.sha256(self.tenant_id.encode()).hexdigest()
-
-
-@dataclass(frozen=True)
-class Decision:
-    tenant_id: str
-    stage: str
-    event_count: int
-    input_fingerprint: str
-
-    @property
-    def name(self) -> str:
-        return f"{DECISION_NAMESPACE}.{DECISION_VERSION}"
-
-    def deterministic_id(self) -> str:
-        source = (
-            f"{self.tenant_id}|"
-            f"{self.name}|"
-            f"{self.stage}|"
-            f"{self.event_count}|"
-            f"{self.input_fingerprint}"
-        )
-        return hashlib.sha256(source.encode()).hexdigest()
-
-    def to_record(self) -> Dict:
-        return {
-            "decision_id": self.deterministic_id(),
-            "decision_name": self.name,
-            "tenant_id": self.tenant_id,
-            "result": self.stage,
-            "inputs": {
-                "event_count": self.event_count,
-                "input_fingerprint": self.input_fingerprint,
-            },
-        }
-
-# -----------------------------
-# Rule Abstraction
-# -----------------------------
-
-class DecisionRule(Protocol):
-    def evaluate(self, events: Iterable[Event]) -> List[Decision]:
-        ...
-
-
-def evaluate(events: Iterable[Event]) -> List[Decision]:
-    tenant_events: Dict[str, List[Event]] = {}
+def compute_credit_stage(events):
+    """
+    Extremely simple deterministic rule:
+    - If tenant has >= 1 event → stage_1
+    This is placeholder logic to prove structure, not business value.
+    """
+    tenant_event_count = {}
 
     for event in events:
-        tenant_events.setdefault(event.tenant_id, []).append(event)
+        tenant = event["tenant_id"]
+        tenant_event_count[tenant] = tenant_event_count.get(tenant, 0) + 1
 
-    decisions: List[Decision] = []
+    decisions = []
 
-    for tenant_id, evts in tenant_events.items():
-        stage = "stage_1" if len(evts) >= 1 else "unknown"
+    for tenant, count in tenant_event_count.items():
+        stage = "stage_1" if count >= 1 else "unknown"
 
-        fingerprint_source = "".join(e.fingerprint() for e in evts)
-        input_fp = hashlib.sha256(fingerprint_source.encode()).hexdigest()
+        decision = {
+            "decision_name": "decision.credit_stage.v1",
+            "tenant_id": tenant,
+            "computed_stage": stage,
+            "input_event_count": count
+        }
 
-        decisions.append(
-            Decision(
-                tenant_id=tenant_id,
-                stage=stage,
-                event_count=len(evts),
-                input_fingerprint=input_fp,
-            )
-        )
+        decisions.append(decision)
 
     return decisions
 
+def write_decision(decision):
+    decision_id_source = f"{decision['tenant_id']}:{decision['decision_name']}:{decision['computed_stage']}"
+    decision_id = hashlib.sha256(decision_id_source.encode()).hexdigest()
 
-class CreditStageRule:
-    pass
+    record = {
+        "decision_id": decision_id,
+        "decision_name": decision["decision_name"],
+        "tenant_id": decision["tenant_id"],
+        "result": decision["computed_stage"],
+        "inputs": {
+            "event_count": decision["input_event_count"]
+        }
+    }
 
-# -----------------------------
-# Persistence Abstraction
-# -----------------------------
+    LEDGER_PATH.mkdir(parents=True, exist_ok=True)
+    file_path = LEDGER_PATH / f"{decision_id}.json"
 
-class DecisionStore(Protocol):
-    def save(self, record: Dict) -> None:
-        ...
+    if file_path.exists():
+        return  # idempotent: decision already recorded
 
+    with open(file_path, "w") as f:
+        json.dump(record, f, indent=2)
 
-class FileLedgerStore:
-    def __init__(self, base_path: Path):
-        self.base_path = base_path
-        self.base_path.mkdir(parents=True, exist_ok=True)
+def run_decision_engine():
+    events = load_events()
+    decisions = compute_credit_stage(events)
 
-    def save(self, record: Dict) -> None:
-        decision_id = record["decision_id"]
-        final_path = self.base_path / f"{decision_id}.json"
-        temp_path = final_path.with_suffix(".tmp")
-
-        if final_path.exists():
-            logger.debug("Decision already exists: %s", decision_id)
-            return
-
-        with open(temp_path, "w") as f:
-            json.dump(record, f, indent=2)
-
-        temp_path.replace(final_path)
-        logger.info("Decision recorded: %s", decision_id)
-
-# -----------------------------
-# Orchestration
-# -----------------------------
-
-class DecisionEngine:
-    def __init__(self, rules: List[DecisionRule], store: DecisionStore):
-        self.rules = rules
-        self.store = store
-
-    def run(self, raw_events: Iterable[Dict]) -> None:
-        events: List[Event] = []
-
-        for raw in raw_events:
-            try:
-                events.append(Event.from_raw(raw))
-            except ValueError as e:
-                logger.warning("Skipping event: %s", e)
-
-        for rule in self.rules:
-            decisions = rule.evaluate(events)
-            for decision in decisions:
-                self.store.save(decision.to_record())
-
-# -----------------------------
-# Entry Point
-# -----------------------------
-
-def main():
-    event_path = Path(EVENT_FILE)
-    if not event_path.exists():
-        logger.warning(f"Event file not found: {event_path}. Creating empty file.")
-        event_path.parent.mkdir(parents=True, exist_ok=True)
-        event_path.write_text("[]")  # empty JSON array
-
-    # Pass a string path to load_events
-    raw_events = load_events(event_path)
-
-    engine = DecisionEngine(
-        rules=[CreditStageRule()],
-        store=FileLedgerStore(LEDGER_PATH),
-    )
-    engine.run(raw_events)
+    for decision in decisions:
+        write_decision(decision)
 
 if __name__ == "__main__":
-    main()
+    run_decision_engine()

@@ -1,0 +1,5 @@
+include .env.dev
+export
+
+start-api:
+	PYTHONPATH=$(PWD) python -m contracts.api.main
